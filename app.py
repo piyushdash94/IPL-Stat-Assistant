@@ -14,7 +14,7 @@ from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
 
 from load_and_clean_df import load_and_clean_df as _load_and_clean_df
 
-
+default_disclaimer = "The AI's responses are based on the data available till 16-04-2026 PBKS vs MI match (included) and may not reflect real-time information. Use at your own risk."
 
 @st.cache_data()
 def load_and_clean_df():
@@ -149,6 +149,16 @@ with st.sidebar:
         use_container_width=True
     )
 
+    st.markdown(
+        f"""
+        <div style="text-align: center; color: gray; font-size: 12px; margin-top: 20px;">
+            © 2026 All rights reserved.<br>
+            Disclaimer: {default_disclaimer}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
     # st.write("📤 **Import External Chat**")
     # uploaded_file = st.file_uploader(
     #     "Upload an exported JSON history file", 
@@ -245,7 +255,7 @@ for msg in st.session_state["active_chat_history"].messages:
             if msg.content == "Chat cleared. Ask me anything about IPL Stats!" or msg.content == "Hello! I am your IPL Stat Assistant. How can I help you today?":
                 st.markdown(msg.content)
             else:
-                st.markdown(msg.content + f"\n\n*Note: The AI's response is based on the data available till 16-04-2026 PBKS vs MI match (included) and may not reflect real-time information.*")
+                st.markdown(msg.content + f"\n\n*Note: {default_disclaimer}*")
     # st.chat_message(msg.type).write(msg.content)
 
 if user_query := st.chat_input("Ask anything related to IPL Stats..."):
