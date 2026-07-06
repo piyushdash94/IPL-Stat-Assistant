@@ -1,0 +1,19 @@
+[project]
+name = "ipl-stat-assistant"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "kagglehub[pandas-datasets]>=1.0.2",
+    "langchain>=1.3.11",
+    "langchain-anthropic>=1.4.8",
+    "langchain-core>=1.4.8",
+    "langchain-experimental>=0.4.2",
+    "langchain-groq>=1.1.3",
+    "langchain-openai>=1.3.3",
+    "numpy>=2.4.6",
+    "pandas>=3.0.3",
+    "streamlit>=1.58.0",
+    "tabulate>=0.10.0",
+]
