@@ -2,19 +2,30 @@ import streamlit as st
 import json
 import datetime
 
-from langchain_anthropic import ChatAnthropic
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_experimental.agents import create_pandas_dataframe_agent
 # from langchain_experimental.agents.agent_toolkits.pandas.base import create_pandas_dataframe_agent
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 from langchain_core.messages import  messages_to_dict
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
 
+import pandas as pd
+
 from load_and_clean_df import load_and_clean_df as _load_and_clean_df
+from match_summary import (
+    list_matches,
+    build_match_summary,
+    render_card,
+    chart_frame_from_markdown,
+)
 
 default_disclaimer = "The AI's responses are based on the data available till 16-04-2026 PBKS vs MI match (included) and may not reflect real-time information. Use at your own risk."
+
+GREETING = "Hello! I am your IPL Stat Assistant. How can I help you today?"
+CLEARED = "Chat cleared. Ask me anything about IPL Stats!"
+# Turns of prior conversation fed back to the agent so follow-up questions keep context.
+HISTORY_TURNS = 6
 
 @st.cache_data()
 def load_and_clean_df():
@@ -26,14 +37,14 @@ def add_new_chat():
     st.session_state.chat_history_list.append(new_chat)
     st.session_state.chat_history_selector = new_chat
     new_chat_history = StreamlitChatMessageHistory(key=new_chat)
-    new_chat_history.add_ai_message("Hello! I am your IPL Stat Assistant. How can I help you today?")
+    new_chat_history.add_ai_message(GREETING)
 
 def clear_chat_history():
     present_chat = st.session_state.chat_history_selector
     chat_history_db = StreamlitChatMessageHistory(key = present_chat)
     if len(chat_history_db.messages) > 1:
         chat_history_db.clear()
-        chat_history_db.add_ai_message("Chat cleared. Ask me anything about IPL Stats!")
+        chat_history_db.add_ai_message(CLEARED)
 
 
 
@@ -44,7 +55,7 @@ if "chat_history_list" not in st.session_state:
 
 st.session_state["active_chat_history"] = StreamlitChatMessageHistory(key=st.session_state.chat_history_selector)
 if len(st.session_state["active_chat_history"].messages) == 0:
-    st.session_state["active_chat_history"].add_ai_message("Hello! I am your IPL Stat Assistant. How can I help you today?")
+    st.session_state["active_chat_history"].add_ai_message(GREETING)
 
 
 st.set_page_config(
@@ -61,55 +72,44 @@ st.set_page_config(
 st.markdown("<div style='text-align: center; color: lightblue;'><h2>🏏 IPL Stat Assistant</h2></div>", unsafe_allow_html=True)
 
 
-MODELS_OPENAI = [
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini"
-]
-MODELS_ANTHROPIC = [
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-sonnet-5",
+# OpenRouter serves OpenAI, Anthropic and Gemini models through a single key.
+# Model ids are OpenRouter slugs (https://openrouter.ai/models) and can be edited freely.
+MODELS_OPENROUTER = [
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "anthropic/claude-3.5-sonnet",
+    "google/gemini-2.0-flash-001",
+    "google/gemini-flash-1.5",
 ]
 MODELS_GROQ = [
     "qwen/qwen3.6-27b", # Can capable of searching similar names
     # "qwen/qwen3-32b", # Need Exact Names to work well
-    # "openai/gpt-oss-20b", # 
+    # "openai/gpt-oss-20b", #
 ]
 
 with st.sidebar:
-    st.selectbox("Select a provider", ["Groq", "OpenAI", "Anthropic"], key="provider")
-    if st.session_state.provider == "OpenAI":
-        MODELS = MODELS_OPENAI
-    elif st.session_state.provider == "Anthropic":
-        MODELS = MODELS_ANTHROPIC
+    st.selectbox("Select a provider", ["OpenRouter", "Groq"], key="provider")
+    if st.session_state.provider == "OpenRouter":
+        MODELS = MODELS_OPENROUTER
     else:
         MODELS = MODELS_GROQ
     st.selectbox("Select a model", MODELS, key="model")
 
     st.write("API Keys")
-    popover_cols = st.columns(3)
+    popover_cols = st.columns(2)
 
     with popover_cols[0]:
-        with st.popover("OpenAI"):
+        with st.popover("OpenRouter"):
             st.text_input(
-                "Introduce your OpenAI API Key (https://platform.openai.com/)", 
-                value=st.session_state.get("openai_api_key", None),
+                "Introduce your OpenRouter API Key (https://openrouter.ai/keys)",
+                value=st.session_state.get("openrouter_api_key", None),
                 type="password",
-                key="openai_api_key",
+                key="openrouter_api_key",
             )
     with popover_cols[1]:
-        with st.popover("Anthropic"):
-            st.text_input(
-                "Introduce your Anthropic API Key (https://console.anthropic.com/)", 
-                value=st.session_state.get("anthropic_api_key", None),
-                type="password",
-                key="anthropic_api_key",
-            )
-    with popover_cols[2]:
         with st.popover("Groq"):
             st.text_input(
-                "Introduce your Groq API Key (https://groq.com/pricing)", 
+                "Introduce your Groq API Key (https://groq.com/pricing)",
                 value=st.session_state.get("groq_api_key", None),
                 type="password",
                 key="groq_api_key",
@@ -117,15 +117,13 @@ with st.sidebar:
 
     st.divider()
 
-openai_api_key = st.session_state.get("openai_api_key", None)
-anthropic_api_key = st.session_state.get("anthropic_api_key", None)
+openrouter_api_key = st.session_state.get("openrouter_api_key", None)
 groq_api_key = st.session_state.get("groq_api_key", None)
 
-missing_openai = openai_api_key == "" or openai_api_key is None or "sk-" not in openai_api_key
-missing_anthropic = anthropic_api_key == "" or anthropic_api_key is None
-missing_groq = groq_api_key == "" or groq_api_key is None
+missing_openrouter = not openrouter_api_key
+missing_groq = not groq_api_key
 
-if (st.session_state.provider == "OpenAI" and missing_openai) or (st.session_state.provider == "Anthropic" and missing_anthropic) or (st.session_state.provider == "Groq" and missing_groq):
+if (st.session_state.provider == "OpenRouter" and missing_openrouter) or (st.session_state.provider == "Groq" and missing_groq):
     st.warning("⬅️ Please introduce an API Key of the provider selected to continue...")
     st.stop()
 
@@ -175,20 +173,15 @@ if model_provider == "Groq":
         model=st.session_state.model,
         temperature=0
     )
-elif model_provider == "OpenAI":
+elif model_provider == "OpenRouter":
     llm = ChatOpenAI(
-        api_key=openai_api_key, # type: ignore
+        api_key=openrouter_api_key, # type: ignore
+        base_url="https://openrouter.ai/api/v1",
         model=st.session_state.model,
-        temperature=0
-    )
-elif model_provider == "anthropic":
-    llm = ChatAnthropic(
-        api_key=anthropic_api_key,
-        model=st.session_state.model, # type: ignore
         temperature=0,
-        timeout=None,
-        stop=None,
-        model_name='',
+        # Cap the completion so requests fit limited/free OpenRouter balances
+        # (the default reserves 16k tokens up front and 402s on low credits).
+        max_tokens=1024,
     )
 else:
     st.error("Invalid provider selected.")
@@ -202,30 +195,22 @@ with st.spinner("Preparing Dataset"):
         st.stop()
 
 with st.spinner("Creating Agent"):
-    system_prompt = """You are an advanced data analyst expert in Python and Pandas.
-        You are working with a pre-loaded pandas DataFrame named `df`.
-        CRITICAL RULES:
-         - You have READ-ONLY access to the data.
-         - DO NOT create, redefine, mock or copy the dataframe `df`. It already exists in your environment.
-         - DO NOT import pandas as pd. It is already imported.
-         - NEVER use destructive operations like `df.drop()`, `inplace=True`, `del df[...]`, or re-assigning columns via `df['col'] = ...`.
-         - If you need to filter or manipulate data, ALWAYS create a separate temporary copy or variable (e.g., `filtered_df = df[df['runs'] > 50]`) or use safe methods like `.loc[]`.
-         - Simply write code that queries the existing `df` variable.
-         - To see what data is actually inside the dataframe, you should ALWAYS look at `df.head()` or `df.columns` first if you are unsure.
-        This is the structure of the dataframe you have access to:
-        {df_head}
-        If you need more explanation about a column check the dictionary `df.attrs['col_description']` where in the keys are the column names and the values are the descriptions of the columns.
-    """
+    # Read-only safety rules + answer-formatting, used as the agent prefix.
+    # (The factory appends df.head() to the prompt itself, so no df_head here.)
+    system_prompt = """You are an advanced data analyst expert in Python and Pandas answering questions about IPL Stats using a pre-loaded DataFrame named `df`.
+CRITICAL RULES:
+ - You have READ-ONLY access to the data.
+ - DO NOT create, redefine, mock or copy the dataframe `df`. It already exists in your environment.
+ - DO NOT import pandas as pd. It is already imported.
+ - NEVER use destructive operations like `df.drop()`, `inplace=True`, `del df[...]`, or re-assigning columns via `df['col'] = ...`.
+ - If you need to filter or manipulate data, ALWAYS create a separate temporary variable (e.g. `filtered_df = df[df['over'] < 6]`) or use safe methods like `.loc[]`.
+ - To see what is in the data, look at `df.head()` or `df.columns` first if unsure. Column descriptions are in `df.attrs['col_description']`.
+ - Answer only from `df`. If you don't know, say 'I can not answer' — do not make up an answer.
+ - When the answer is a ranking or list of items with numeric values (e.g. top run scorers, wickets per season), present it as a GitHub-style markdown table with the label in the first column so it can be charted.
+"""
 
-    df_head_info = df.head(3).to_string()
     df_columns = df.columns.tolist()
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt.format(df_head=df_head_info)),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
     try:
         agent = create_pandas_dataframe_agent(
             llm,
@@ -233,9 +218,7 @@ with st.spinner("Creating Agent"):
             agent_type="tool-calling",
             allow_dangerous_code=True,
             verbose=True,
-            # prompt=prompt,
-            # system_prompt=system_prompt.format(df_head=df_head_info),
-            prefix=f"You are a helpful assistant that can answer questions about IPL Stats using the provided DataFrame df by only queries. Please answer the user's questions based on the data in df. If you don't know the answer, just say 'I can not answer'. Do not try to make up an answer. These are the column names in the DataFrame: {df_columns}.",
+            prefix=f"{system_prompt}\nThese are the column names in the DataFrame: {df_columns}.",
             agent_executor_kwargs={
                 "handle_parsing_errors": True,
             },
@@ -246,13 +229,38 @@ with st.spinner("Creating Agent"):
         st.error(f"Error creating agent: {e}")
         st.stop()
 
+with st.expander("📋 Match Summary & Charts", expanded=False):
+    matches = list_matches(df)
+    picked = st.selectbox(
+        "Pick a match",
+        matches["label"].tolist(),
+        index=None,
+        placeholder="Search a match (team, season, date)…",
+        key="match_summary_pick",
+    )
+    if picked:
+        match_id = matches.loc[matches["label"] == picked, "match_id"].iloc[0]
+        summary = build_match_summary(df, match_id)
+        st.code(render_card(summary), language=None)
+        for inn in summary["innings"]:
+            if inn["over_runs"]:
+                st.caption(f"Runs per over — {inn['team']}")
+                # Numeric over index so the x-axis stays in 1..N order
+                # (string labels sort lexicographically: Ov 1, Ov 10, Ov 2…).
+                st.bar_chart(
+                    pd.DataFrame(
+                        {"runs": inn["over_runs"]},
+                        index=pd.Index(range(1, len(inn["over_runs"]) + 1), name="over"),
+                    )
+                )
+
 for msg in st.session_state["active_chat_history"].messages:
     if msg.type == "human":
         with st.chat_message("user"):
             st.markdown(msg.content)
     elif msg.type == "ai":
         with st.chat_message("assistant"):
-            if msg.content == "Chat cleared. Ask me anything about IPL Stats!" or msg.content == "Hello! I am your IPL Stat Assistant. How can I help you today?":
+            if msg.content in (CLEARED, GREETING):
                 st.markdown(msg.content)
             else:
                 st.markdown(msg.content + f"\n\n*Note: {default_disclaimer}*")
@@ -266,11 +274,27 @@ if user_query := st.chat_input("Ask anything related to IPL Stats..."):
         try:
             with st.expander("👀 View AI Thinking Process & Code Queries", expanded=False):
                 st_callback = StreamlitCallbackHandler(st.container())
+
+            # Give the agent short-term memory: replay the last few turns as context.
+            # The pandas-agent prompt has no chat_history slot, so we fold it into the input.
+            prior = [
+                m for m in st.session_state["active_chat_history"].messages
+                if m.content not in (GREETING, CLEARED)
+            ][-HISTORY_TURNS:]
+            if prior:
+                transcript = "\n".join(
+                    f"{'User' if m.type == 'human' else 'Assistant'}: {m.content}"
+                    for m in prior
+                )
+                agent_input = (
+                    "Earlier conversation (for context on follow-up questions):\n"
+                    f"{transcript}\n\nCurrent question: {user_query}"
+                )
+            else:
+                agent_input = user_query
+
             response = agent.invoke(
-                {
-                "input": user_query,
-                # "chat_history": st.session_state["active_chat_history"].messages
-                },
+                {"input": agent_input},
                 {"callbacks": [st_callback]}
             )
             answer = response['output'] + f"\n\nModel: {st.session_state.model}"
@@ -279,6 +303,13 @@ if user_query := st.chat_input("Ask anything related to IPL Stats..."):
             # st.rerun()
             with st.chat_message("assistant"):
                 st.markdown(answer)
+                # Auto-chart: if the answer contains a numeric markdown table, plot it.
+                try:
+                    chart_df = chart_frame_from_markdown(answer)
+                    if chart_df is not None and not chart_df.empty:
+                        st.bar_chart(chart_df)
+                except Exception:
+                    pass
                 st.caption(f"Model: {st.session_state.model} | Generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         except Exception as e:
             st.error(f"Error generating response: {e}")
