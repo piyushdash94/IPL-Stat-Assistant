@@ -1,7 +1,7 @@
 [project]
 name = "ipl-stat-assistant"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Conversational IPL stats assistant (LangChain pandas agent) with match summaries, momentum charts and multi-provider LLM support"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -10,6 +10,7 @@ dependencies = [
     "langchain-anthropic>=1.4.8",
     "langchain-core>=1.4.8",
     "langchain-experimental>=0.4.2",
+    "langchain-google-genai>=4.4.0",
     "langchain-groq>=1.1.3",
     "langchain-openai>=1.3.3",
     "numpy>=2.4.6",

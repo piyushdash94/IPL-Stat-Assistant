@@ -11,11 +11,15 @@ from langchain_core.messages import  messages_to_dict
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
 
 import pandas as pd
+import altair as alt
+
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from load_and_clean_df import load_and_clean_df as _load_and_clean_df
 from match_summary import (
     list_matches,
     build_match_summary,
+    build_headline,
     render_card,
     chart_frame_from_markdown,
 )
@@ -24,8 +28,10 @@ default_disclaimer = "The AI's responses are based on the data available till 16
 
 GREETING = "Hello! I am your IPL Stat Assistant. How can I help you today?"
 CLEARED = "Chat cleared. Ask me anything about IPL Stats!"
-# Turns of prior conversation fed back to the agent so follow-up questions keep context.
-HISTORY_TURNS = 6
+# Prior conversation fed back to the agent so follow-ups keep context.
+# Kept lean: few turns, each clipped, so memory costs little token overhead.
+HISTORY_TURNS = 4
+MEMORY_CHARS = 200
 
 @st.cache_data()
 def load_and_clean_df():
@@ -81,22 +87,30 @@ MODELS_OPENROUTER = [
     "google/gemini-2.0-flash-001",
     "google/gemini-flash-1.5",
 ]
+# Native Gemini models (used with a direct Google API key, not via OpenRouter).
+MODELS_GEMINI = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
 MODELS_GROQ = [
     "qwen/qwen3.6-27b", # Can capable of searching similar names
     # "qwen/qwen3-32b", # Need Exact Names to work well
     # "openai/gpt-oss-20b", #
 ]
 
+MODELS_BY_PROVIDER = {
+    "OpenRouter": MODELS_OPENROUTER,
+    "Gemini": MODELS_GEMINI,
+    "Groq": MODELS_GROQ,
+}
+
 with st.sidebar:
-    st.selectbox("Select a provider", ["OpenRouter", "Groq"], key="provider")
-    if st.session_state.provider == "OpenRouter":
-        MODELS = MODELS_OPENROUTER
-    else:
-        MODELS = MODELS_GROQ
-    st.selectbox("Select a model", MODELS, key="model")
+    st.selectbox("Select a provider", list(MODELS_BY_PROVIDER), key="provider")
+    st.selectbox("Select a model", MODELS_BY_PROVIDER[st.session_state.provider], key="model")
 
     st.write("API Keys")
-    popover_cols = st.columns(2)
+    popover_cols = st.columns(3)
 
     with popover_cols[0]:
         with st.popover("OpenRouter"):
@@ -107,6 +121,14 @@ with st.sidebar:
                 key="openrouter_api_key",
             )
     with popover_cols[1]:
+        with st.popover("Gemini"):
+            st.text_input(
+                "Introduce your Google/Gemini API Key (https://aistudio.google.com/apikey)",
+                value=st.session_state.get("google_api_key", None),
+                type="password",
+                key="google_api_key",
+            )
+    with popover_cols[2]:
         with st.popover("Groq"):
             st.text_input(
                 "Introduce your Groq API Key (https://groq.com/pricing)",
@@ -118,12 +140,16 @@ with st.sidebar:
     st.divider()
 
 openrouter_api_key = st.session_state.get("openrouter_api_key", None)
+google_api_key = st.session_state.get("google_api_key", None)
 groq_api_key = st.session_state.get("groq_api_key", None)
 
-missing_openrouter = not openrouter_api_key
-missing_groq = not groq_api_key
+_key_for_provider = {
+    "OpenRouter": openrouter_api_key,
+    "Gemini": google_api_key,
+    "Groq": groq_api_key,
+}
 
-if (st.session_state.provider == "OpenRouter" and missing_openrouter) or (st.session_state.provider == "Groq" and missing_groq):
+if not _key_for_provider[st.session_state.provider]:
     st.warning("⬅️ Please introduce an API Key of the provider selected to continue...")
     st.stop()
 
@@ -183,6 +209,12 @@ elif model_provider == "OpenRouter":
         # (the default reserves 16k tokens up front and 402s on low credits).
         max_tokens=1024,
     )
+elif model_provider == "Gemini":
+    llm = ChatGoogleGenerativeAI(
+        model=st.session_state.model,
+        google_api_key=google_api_key,
+        temperature=0,
+    )
 else:
     st.error("Invalid provider selected.")
     st.stop()
@@ -241,18 +273,51 @@ with st.expander("📋 Match Summary & Charts", expanded=False):
     if picked:
         match_id = matches.loc[matches["label"] == picked, "match_id"].iloc[0]
         summary = build_match_summary(df, match_id)
+        headline = build_headline(summary)
+        if headline:
+            st.info(headline)
         st.code(render_card(summary), language=None)
+        # Momentum worm (cumulative runs) with momentum-shift overs marked —
+        # more informative than a plain runs/over chart the card already sparklines.
         for inn in summary["innings"]:
-            if inn["over_runs"]:
-                st.caption(f"Runs per over — {inn['team']}")
-                # Numeric over index so the x-axis stays in 1..N order
-                # (string labels sort lexicographically: Ov 1, Ov 10, Ov 2…).
-                st.bar_chart(
-                    pd.DataFrame(
-                        {"runs": inn["over_runs"]},
-                        index=pd.Index(range(1, len(inn["over_runs"]) + 1), name="over"),
+            if not inn["cum_runs"]:
+                continue
+            st.caption(f"Momentum — {inn['team']} (cumulative runs; shift overs marked)")
+            worm = pd.DataFrame(
+                {"over": range(1, len(inn["cum_runs"]) + 1), "runs": inn["cum_runs"]}
+            )
+            layers = [
+                alt.Chart(worm).mark_line().encode(
+                    x=alt.X("over:Q", title="Over"),
+                    y=alt.Y("runs:Q", title="Cumulative runs"),
+                )
+            ]
+            if inn["shifts"]:
+                sdf = pd.DataFrame(
+                    [
+                        {
+                            "over": s["over"],
+                            "runs": inn["cum_runs"][s["over"] - 1],
+                            "kind": s["kind"],
+                            "detail": f"{s['kind']} · over {s['over']} · {s['runs']}r/{s['wickets']}w",
+                        }
+                        for s in inn["shifts"]
+                    ]
+                )
+                layers.append(
+                    alt.Chart(sdf).mark_point(size=150, filled=True).encode(
+                        x="over:Q",
+                        y="runs:Q",
+                        color=alt.Color(
+                            "kind:N",
+                            scale=alt.Scale(domain=["collapse", "surge"],
+                                            range=["#e45756", "#54a24b"]),
+                            legend=alt.Legend(title="Shift"),
+                        ),
+                        tooltip=["detail"],
                     )
                 )
+            st.altair_chart(alt.layer(*layers), use_container_width=True)
 
 for msg in st.session_state["active_chat_history"].messages:
     if msg.type == "human":
@@ -275,19 +340,24 @@ if user_query := st.chat_input("Ask anything related to IPL Stats..."):
             with st.expander("👀 View AI Thinking Process & Code Queries", expanded=False):
                 st_callback = StreamlitCallbackHandler(st.container())
 
-            # Give the agent short-term memory: replay the last few turns as context.
-            # The pandas-agent prompt has no chat_history slot, so we fold it into the input.
+            # Give the agent lean short-term memory: replay a few recent turns,
+            # each stripped of the stored "Model:" footer and clipped, since the
+            # pandas-agent prompt has no chat_history slot.
+            def _clip(text):
+                text = text.split("\n\nModel:")[0].strip()
+                return text if len(text) <= MEMORY_CHARS else text[:MEMORY_CHARS] + "…"
+
             prior = [
                 m for m in st.session_state["active_chat_history"].messages
                 if m.content not in (GREETING, CLEARED)
             ][-HISTORY_TURNS:]
             if prior:
                 transcript = "\n".join(
-                    f"{'User' if m.type == 'human' else 'Assistant'}: {m.content}"
+                    f"{'User' if m.type == 'human' else 'Assistant'}: {_clip(m.content)}"
                     for m in prior
                 )
                 agent_input = (
-                    "Earlier conversation (for context on follow-up questions):\n"
+                    "Recent conversation (context for follow-ups):\n"
                     f"{transcript}\n\nCurrent question: {user_query}"
                 )
             else:
