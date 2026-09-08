@@ -45,6 +45,30 @@ def _is_wicket(match_df):
     return match_df["player_out"].astype("string").fillna("N/A") != "N/A"
 
 
+def _shift_points(over_runs, over_wickets):
+    """
+    Identify up to 3 momentum-shift overs from per-over runs and wickets:
+    'collapse' overs (2+ wickets) and the single biggest 'surge' over
+    (well above the innings run rate). Modelless and cheap.
+
+    Returns a list of {over (1-indexed), kind, runs, wickets}, ordered by over.
+    """
+    if not over_runs:
+        return []
+    n = len(over_runs)
+    par = sum(over_runs) / n
+    shifts = {}
+    for i, w in enumerate(over_wickets):
+        if w >= 2:
+            shifts[i] = {"over": i + 1, "kind": "collapse",
+                         "runs": over_runs[i], "wickets": w}
+    top_i = max(range(n), key=lambda i: over_runs[i])
+    if over_runs[top_i] >= max(12, par * 1.6) and top_i not in shifts:
+        shifts[top_i] = {"over": top_i + 1, "kind": "surge",
+                         "runs": over_runs[top_i], "wickets": over_wickets[top_i]}
+    return [shifts[k] for k in sorted(shifts)][:3]
+
+
 def list_matches(df):
     """
     Return a DataFrame of selectable matches, newest first.
@@ -110,6 +134,13 @@ def _innings_summary(inn_df, top_n=3):
     over_runs = [int(x) for x in per_over["runs"].tolist()]
     over_wkts = [int(x) for x in per_over["wickets"].tolist()]
 
+    # Cumulative worm + momentum-shift overs (for the plot and headline).
+    cum_runs, running = [], 0
+    for r in over_runs:
+        running += r
+        cum_runs.append(running)
+    shifts = _shift_points(over_runs, over_wkts)
+
     # Powerplay / Middle / Death splits from the precomputed match_phase column.
     phases = []
     if "match_phase" in inn_df.columns:
@@ -135,7 +166,8 @@ def _innings_summary(inn_df, top_n=3):
                 )
 
     return {**totals, "top_batters": top_batters,
-            "over_runs": over_runs, "over_wickets": over_wkts, "phases": phases}
+            "over_runs": over_runs, "over_wickets": over_wkts,
+            "cum_runs": cum_runs, "shifts": shifts, "phases": phases}
 
 
 def build_match_summary(df, match_id, top_n=3):
@@ -174,6 +206,66 @@ def build_match_summary(df, match_id, top_n=3):
         "player_of_match": potm,
         "innings": innings,
     }
+
+
+def build_headline(summary):
+    """
+    A 2-3 line, rule-based headline for a match — no LLM tokens.
+    Covers the result + totals, the standout performer, and a turning point.
+    """
+    inns = summary.get("innings", [])
+    if not inns:
+        return ""
+    lines = []
+
+    if len(inns) >= 2:
+        a, b = inns[0], inns[1]
+        lines.append(
+            f"{summary['result']} — {a['team']} {a['runs']}/{a['wickets']} vs "
+            f"{b['team']} {b['runs']}/{b['wickets']}."
+        )
+    else:
+        a = inns[0]
+        lines.append(f"{summary['result']} — {a['team']} {a['runs']}/{a['wickets']}.")
+
+    # Standout performer: Player of the Match if they batted, else top scorer.
+    potm = summary.get("player_of_match", "N/A")
+    perf = None
+    for inn in inns:
+        for bat in inn["top_batters"]:
+            if bat["name"] == potm:
+                perf = f"{potm} top-scored with {bat['runs']}({bat['balls']})"
+                break
+        if perf:
+            break
+    if not perf and potm not in ("N/A", ""):
+        perf = f"{potm} was Player of the Match"
+    if not perf:
+        allb = [bat for inn in inns for bat in inn["top_batters"]]
+        if allb:
+            top = max(allb, key=lambda x: x["runs"])
+            perf = f"{top['name']} top-scored with {top['runs']}({top['balls']})"
+    if perf:
+        lines.append(perf + ".")
+
+    # Turning point from the shift overs (collapse preferred, else surge).
+    turning = None
+    for inn in inns:
+        collapse = next((s for s in inn.get("shifts", []) if s["kind"] == "collapse"), None)
+        if collapse:
+            turning = (f"{inn['team']} lost {collapse['wickets']} wickets in over "
+                       f"{collapse['over']} — the key swing.")
+            break
+    if not turning:
+        for inn in inns:
+            surge = next((s for s in inn.get("shifts", []) if s["kind"] == "surge"), None)
+            if surge:
+                turning = f"{inn['team']} broke away with {surge['runs']} off over {surge['over']}."
+                break
+    if turning:
+        lines.append(turning)
+
+    return "\n".join(lines[:3])
 
 
 def chart_frame_from_markdown(text):
